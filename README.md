@@ -117,17 +117,29 @@ Requires `pip install faster-whisper` (see Requirements). It's slower than
 plain silence detection — it has to transcribe a clip at each candidate
 pause — but far more accurate on audiobooks with spoken chapter numbers.
 
+**Tuning `--whisper`:**
+
+- *Missing some chapters?* First try a better model: `--whisper-model small`
+  (or `medium`). A weaker model can mishear "Chapter Twelve." If a specific
+  chapter has a very short pause before the announcement, lower `--min-gap`
+  (e.g. `--min-gap 1.0`) so that pause still registers as a candidate.
+- *Too many candidate pauses / too slow?* Raise `--min-gap` (e.g. `2.0`) so
+  only longer pauses are checked. Chapter-break pauses are usually a couple
+  of seconds, so this trims noise without dropping real chapters — but if it
+  starts missing chapters, back it off.
+
 ### Options
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--noise-db` | `-35` | Silence threshold in dB. Lower (more negative) = quieter to count as silence. |
 | `--min-gap` | `1.5` | Minimum length (seconds) of a quiet stretch to count as a gap. |
-| `--min-chapter-len` | `180` | Minimum chapter length in seconds (default 3 minutes). Also the minimum spacing between accepted breaks. |
+| `--min-chapter-len` | `180` | Minimum chapter length in seconds (default 3 minutes). Used by silence-only and `--target-chapters` modes. **Not** used by `--whisper` (which relies on the spoken cue instead, so it won't skip short chapters). |
 | `--target-chapters` | *(none)* | If you know the real chapter count and aren't using `--whisper`: ranks silence gaps by pause length and keeps the N-1 most pronounced ones, instead of accepting every pause past `--min-chapter-len`. |
 | `--whisper` | off | Keep only pauses followed by a spoken chapter announcement (needs faster-whisper). |
 | `--whisper-model` | `base` | faster-whisper model size: `tiny`/`base`/`small`/`medium`/`large`. Bigger = more accurate but slower. |
 | `--whisper-clip-len` | `10` | Seconds of audio after each pause to transcribe when looking for a chapter cue. |
+| `--whisper-dedupe` | `20` | Minimum seconds between two accepted chapter cues, so one announcement isn't counted twice. Unlike a chapter-length minimum, this is small enough that genuinely short chapters are still detected. |
 | `--whisper-lang` | `en` | Language code for transcription. |
 | `--title` | *(none)* | Book title to embed as metadata. |
 | `--author` | *(none)* | Author to embed as metadata. |

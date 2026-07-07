@@ -206,6 +206,16 @@ CHAPTER_CUE = re.compile(
 )
 
 
+def clean_cue_text(text):
+    """Normalize a transcribed clip before cue-matching: Whisper often prepends
+    quotes, dashes, ellipses or a stray '[music]'-style tag, which would push
+    the chapter word past the start anchor. Strip that leading noise."""
+    text = text.strip()
+    text = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)  # drop a leading [sound] tag
+    text = re.sub(r"^[^0-9A-Za-z]+", "", text)     # drop leading quotes/dashes/dots
+    return text
+
+
 def map_abs_to_file(paths, durations, t):
     """Map an absolute timestamp in the merged stream to (path, local_offset)."""
     acc = 0.0
@@ -252,9 +262,14 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
         clip = tmpdir / "clip.wav"
         for i, (s, e) in enumerate(gaps, 1):
             mid = (s + e) / 2
-            if mid < args.min_chapter_len or duration - mid < args.min_chapter_len:
+            # A chapter can't begin in the first/last second of the book.
+            if mid < 1.0 or duration - mid < 1.0:
                 continue
-            if mid - breaks[-1] < args.min_chapter_len:
+            # In Whisper mode the spoken cue is the source of truth, so we do
+            # NOT gate on chapter length — that would skip short chapters. The
+            # only guard is a small de-dupe window so a single announcement
+            # caught across two adjacent micro-pauses isn't counted twice.
+            if len(breaks) > 1 and mid - breaks[-1] < args.whisper_dedupe:
                 continue
             # Map the clip to whichever file speech resumes in (so a chapter
             # announced right after a disk boundary lands in the right file),
@@ -263,10 +278,10 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
             extract_clip(path, offset - 0.3, args.whisper_clip_len, clip)
             segments, _ = model.transcribe(str(clip), language=args.whisper_lang, beam_size=1)
             text = " ".join(seg.text for seg in segments).strip()
-            if CHAPTER_CUE.match(text):
+            if CHAPTER_CUE.match(clean_cue_text(text)):
                 breaks.append(mid)
                 print(f"  [{fmt_time(mid)}] chapter cue: \"{text[:50].strip()}\"")
-            if i % 25 == 0:
+            if i % 50 == 0:
                 print(f"  ...checked {i}/{len(gaps)} pauses, {len(breaks) - 1} chapters so far")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -437,6 +452,7 @@ def main():
     ap.add_argument("--whisper", action="store_true", help="use Whisper to keep only pauses followed by a spoken chapter announcement (needs `pip install faster-whisper`; slower but far more accurate)")
     ap.add_argument("--whisper-model", default="base", help="faster-whisper model size: tiny/base/small/medium/large (default base; bigger = more accurate but slower)")
     ap.add_argument("--whisper-clip-len", type=float, default=10.0, help="seconds of audio after each pause to transcribe when looking for a chapter cue (default 10)")
+    ap.add_argument("--whisper-dedupe", type=float, default=20.0, help="minimum seconds between two accepted chapter cues, to avoid counting one announcement twice; does NOT skip short chapters the way --min-chapter-len would (default 20)")
     ap.add_argument("--whisper-lang", default="en", help="language code for transcription (default en)")
     ap.add_argument("--title", help="book title to embed as metadata")
     ap.add_argument("--author", help="author name to embed as metadata")
