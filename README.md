@@ -8,9 +8,12 @@ Two modes:
 - **Single file** — detects silence gaps in one audio file and proposes
   chapter breaks at them, which you review interactively (keep / drop /
   retime each one) before anything is written.
-- **Combine mode** — pass multiple audio files (e.g. one per chapter) and
-  they're merged into a single `.m4b` in the order you list them, with a
-  chapter marker placed at each file boundary.
+- **Combine mode** — pass multiple audio files (e.g. an audiobook split
+  across several disks/tracks) and they're merged into a single `.m4b` in
+  the order you list them. Silence detection then runs across the *whole*
+  merged stream — chapters aren't assumed to line up with file boundaries,
+  so a single disk file can still contain several chapters (or a chapter
+  can span two disk files). Same interactive review as single-file mode.
 
 Nothing is written to disk until you confirm the chapters.
 
@@ -93,12 +96,15 @@ Pass the files in playback order — the first one becomes the start of the
 book:
 
 ```
-python chapter_engine.py "01 - Intro.mp3" "02 - Chapter One.mp3" "03 - Chapter Two.mp3" -o book.m4b
+python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o book.m4b
 ```
 
-Each input file becomes its own chapter, split at the file boundaries.
-Chapters are titled "Chapter 1", "Chapter 2", etc. automatically — no
-prompts, nothing to name.
+The files are merged into one continuous stream first, then scanned for
+silence just like single-file mode — you get the same proposed-break review
+prompts, and the same `--noise-db` / `--min-gap` / `--min-chapter-len`
+options apply. Chapters are titled "Chapter 1", "Chapter 2", etc.
+automatically. File boundaries themselves aren't treated as chapter breaks —
+only actual silence gaps are.
 
 Works across mixed input formats (e.g. some files mp3, others m4a/wav) —
 each is normalized before being joined, so no manual conversion needed.
@@ -109,7 +115,7 @@ Both modes accept `--title` and `--author` to stamp book-level metadata onto
 the output:
 
 ```
-python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o book.m4b --title "My Book" --author "Jane Doe"
+python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o book.m4b --title "My Book" --author "Jane Doe"
 ```
 
 In single-file mode, if you don't pass `--title`/`--author`, the original

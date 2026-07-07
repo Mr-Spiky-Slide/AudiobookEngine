@@ -14,11 +14,13 @@ Two modes:
       python chapter_engine.py input.mp3 -o output.m4b --min-gap 1.5 --min-chapter-len 180
 
   Multiple files — combine mode. Files are concatenated in the order
-  given on the command line (first file = start of the book), with a
-  chapter marker placed at each file boundary. Chapters are titled
-  "Chapter 1", "Chapter 2", etc. automatically:
-      python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o output.m4b
-      python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o output.m4b --title "My Book" --author "Jane Doe"
+  given on the command line (first file = start of the book, e.g. disk
+  1, disk 2, ...), then silence detection runs across the *whole*
+  merged stream to propose chapter breaks — chapters aren't assumed to
+  line up with file boundaries. Same interactive review as single-file
+  mode. Chapters are titled "Chapter 1", "Chapter 2", etc. automatically:
+      python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o output.m4b
+      python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o output.m4b --title "My Book" --author "Jane Doe"
 
 Requires: ffmpeg + ffprobe on your PATH (brew install ffmpeg)
 
@@ -63,8 +65,18 @@ def get_duration(path):
         sys.exit(f"Could not parse duration from ffprobe output: {out!r}")
 
 
+def parse_silence_log(err):
+    starts = [float(m) for m in re.findall(r"silence_start:\s*([0-9.]+)", err)]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", err)]
+
+    # pair them up (ffmpeg logs start then end in order). If the stream ends
+    # while still silent, the trailing silence_start has no matching end —
+    # zip() drops it, which is fine since we don't want a break right at EOF.
+    return list(zip(starts, ends))
+
+
 def detect_silences(path, noise_db, min_silence_len):
-    """Run ffmpeg's silencedetect filter and parse start/end timestamps."""
+    """Run ffmpeg's silencedetect filter on one file and parse start/end timestamps."""
     _, err, code = run([
         "ffmpeg", "-i", str(path),
         "-af", f"silencedetect=noise={noise_db}dB:d={min_silence_len}",
@@ -72,15 +84,25 @@ def detect_silences(path, noise_db, min_silence_len):
     ])
     if code != 0:
         sys.exit(f"ffmpeg silence detection failed on {path}:\n{err.strip()}")
+    return parse_silence_log(err)
 
-    starts = [float(m) for m in re.findall(r"silence_start:\s*([0-9.]+)", err)]
-    ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", err)]
 
-    # pair them up (ffmpeg logs start then end in order). If the file ends
-    # while still silent, the trailing silence_start has no matching end —
-    # zip() drops it, which is fine since we don't want a break right at EOF.
-    gaps = list(zip(starts, ends))
-    return gaps
+def detect_silences_multi(paths, noise_db, min_silence_len):
+    """Concatenate multiple files in memory and run silencedetect across the
+    whole merged stream, so chapter breaks aren't limited to file boundaries
+    (e.g. audiobooks split across several disk/track files)."""
+    cmd = ["ffmpeg"]
+    for p in paths:
+        cmd += ["-i", str(p)]
+    filter_complex = (
+        f"{build_concat_filter(len(paths))};"
+        f"[outa]silencedetect=noise={noise_db}dB:d={min_silence_len}[sout]"
+    )
+    cmd += ["-filter_complex", filter_complex, "-map", "[sout]", "-f", "null", "-"]
+    _, err, code = run(cmd)
+    if code != 0:
+        sys.exit(f"ffmpeg silence detection failed across input files:\n{err.strip()}")
+    return parse_silence_log(err)
 
 
 def propose_breaks(gaps, duration, min_chapter_len):
@@ -258,18 +280,28 @@ def run_combine(args):
     print("\nReading durations...")
     durations = [get_duration(p) for p in args.inputs]
     total_duration = sum(durations)
+    print(f"Total duration: {fmt_time(total_duration)}")
 
-    breaks = [0.0]
-    for d in durations[:-1]:
-        breaks.append(breaks[-1] + d)
+    print("Scanning for silence gaps across all files (this can take a bit for long books)...")
+    gaps = detect_silences_multi(args.inputs, args.noise_db, args.min_gap)
+    print(f"Found {len(gaps)} silence gaps.")
+
+    breaks = propose_breaks(gaps, total_duration, args.min_chapter_len)
+    if len(breaks) == 1:
+        print("No usable chapter breaks found; output will have a single chapter.")
+    else:
+        print(f"Proposing {len(breaks) - 1} chapter breaks (chapter 1 always starts at 0:00).")
+
+    confirmed = review_breaks(breaks, total_duration)
+    print(f"\nFinalizing {len(confirmed)} chapters...")
 
     global_tags = {"title": args.title, "artist": args.author}
     has_global_tags = bool(args.title or args.author)
 
     chapters_txt = args.output.with_suffix(".chapters.txt")
-    write_chapters_file(breaks, total_duration, chapters_txt, global_tags=global_tags)
+    write_chapters_file(confirmed, total_duration, chapters_txt, global_tags=global_tags)
 
-    print("\nCombining files and muxing chapters into output file...")
+    print("Combining files and muxing chapters into output file...")
     err, code = combine_and_mux(args.inputs, chapters_txt, args.output, has_global_tags)
     finalize(err, code, args.output)
 
@@ -280,14 +312,14 @@ def main():
     )
     ap.add_argument(
         "inputs", type=Path, nargs="+",
-        help="raw audio file(s). Pass one file for silence-detected chapters, "
-             "or multiple files (in playback order) to combine them with a "
-             "chapter per file"
+        help="raw audio file(s). Pass one file, or multiple files in "
+             "playback order (e.g. one per disk/track) to be merged and "
+             "scanned as a single continuous stream"
     )
     ap.add_argument("-o", "--output", type=Path, required=True, help="output .m4b path")
-    ap.add_argument("--noise-db", type=float, default=-35.0, help="silence threshold in dB, single-file mode only (default -35)")
-    ap.add_argument("--min-gap", type=float, default=1.5, help="minimum silence length to count as a gap, seconds, single-file mode only (default 1.5)")
-    ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds, single-file mode only (default 180 = 3 min)")
+    ap.add_argument("--noise-db", type=float, default=-35.0, help="silence threshold in dB (default -35)")
+    ap.add_argument("--min-gap", type=float, default=1.5, help="minimum silence length to count as a gap, seconds (default 1.5)")
+    ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds (default 180 = 3 min)")
     ap.add_argument("--title", help="book title to embed as metadata")
     ap.add_argument("--author", help="author name to embed as metadata")
     args = ap.parse_args()
