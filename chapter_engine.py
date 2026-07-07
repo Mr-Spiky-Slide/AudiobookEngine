@@ -105,12 +105,35 @@ def detect_silences_multi(paths, noise_db, min_silence_len):
     return parse_silence_log(err)
 
 
-def propose_breaks(gaps, duration, min_chapter_len):
+def propose_breaks(gaps, duration, min_chapter_len, target_chapters=None):
     """Turn silence gaps into candidate chapter-break timestamps.
 
-    Uses the midpoint of each silence gap, and filters out candidates
-    that would create a chapter shorter than min_chapter_len.
+    Default behavior: walk the gaps in order and keep the midpoint of any
+    gap that's at least min_chapter_len away from the last accepted break.
+    This treats every sufficiently-spaced pause as a chapter break, which
+    over-detects on books with frequent natural pauses (paragraph breaks,
+    dramatic beats) shorter than real chapter breaks.
+
+    If target_chapters is given, instead rank gaps by how long the silence
+    itself is (a real chapter break is usually a more pronounced pause than
+    a mid-narration breath) and greedily keep the target_chapters - 1
+    longest ones that are still at least min_chapter_len apart, then sort
+    them back into chronological order.
     """
+    if target_chapters:
+        needed = max(0, target_chapters - 1)
+        ranked = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)
+        selected = []
+        for s, e in ranked:
+            if len(selected) >= needed:
+                break
+            mid = (s + e) / 2
+            if mid < min_chapter_len or duration - mid < min_chapter_len:
+                continue
+            if all(abs(mid - b) >= min_chapter_len for b in selected):
+                selected.append(mid)
+        return [0.0] + sorted(selected)
+
     candidates = [(s + e) / 2 for s, e in gaps]
     breaks = [0.0]
     for c in candidates:
@@ -252,7 +275,9 @@ def run_single_file(args):
     gaps = detect_silences(input_path, args.noise_db, args.min_gap)
     print(f"Found {len(gaps)} silence gaps.")
 
-    breaks = propose_breaks(gaps, duration, args.min_chapter_len)
+    if args.target_chapters:
+        print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
+    breaks = propose_breaks(gaps, duration, args.min_chapter_len, args.target_chapters)
     if len(breaks) == 1:
         print("No usable chapter breaks found; output will have a single chapter.")
     else:
@@ -286,7 +311,9 @@ def run_combine(args):
     gaps = detect_silences_multi(args.inputs, args.noise_db, args.min_gap)
     print(f"Found {len(gaps)} silence gaps.")
 
-    breaks = propose_breaks(gaps, total_duration, args.min_chapter_len)
+    if args.target_chapters:
+        print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
+    breaks = propose_breaks(gaps, total_duration, args.min_chapter_len, args.target_chapters)
     if len(breaks) == 1:
         print("No usable chapter breaks found; output will have a single chapter.")
     else:
@@ -319,7 +346,8 @@ def main():
     ap.add_argument("-o", "--output", type=Path, required=True, help="output .m4b path")
     ap.add_argument("--noise-db", type=float, default=-35.0, help="silence threshold in dB (default -35)")
     ap.add_argument("--min-gap", type=float, default=1.5, help="minimum silence length to count as a gap, seconds (default 1.5)")
-    ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds (default 180 = 3 min)")
+    ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds (default 180 = 3 min); also used as minimum spacing between breaks when --target-chapters is set")
+    ap.add_argument("--target-chapters", type=int, help="if you know the expected chapter count, rank silence gaps by pause length and keep the N-1 most pronounced ones instead of accepting every gap past --min-chapter-len")
     ap.add_argument("--title", help="book title to embed as metadata")
     ap.add_argument("--author", help="author name to embed as metadata")
     args = ap.parse_args()

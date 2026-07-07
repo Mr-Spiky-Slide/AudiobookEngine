@@ -83,11 +83,17 @@ Options:
 |---|---|---|
 | `--noise-db` | `-35` | Silence threshold in dB. Lower (more negative) = quieter to count as silence. |
 | `--min-gap` | `1.5` | Minimum length (seconds) of a quiet stretch to count as a gap. |
-| `--min-chapter-len` | `180` | Minimum chapter length in seconds (default 3 minutes). |
+| `--min-chapter-len` | `180` | Minimum chapter length in seconds (default 3 minutes). Also used as the minimum spacing between breaks when `--target-chapters` is set. |
+| `--target-chapters` | *(none)* | If you know how many chapters the book actually has, set this. Instead of accepting every pause past `--min-chapter-len`, it ranks all silence gaps by how long the pause is and keeps the N-1 most pronounced ones — real chapter breaks tend to have longer pauses than mid-narration breaths, so this is much more accurate than a fixed time floor. |
 
 Example with tuned thresholds:
 ```
 python chapter_engine.py input.mp3 -o output.m4b --noise-db -30 --min-gap 2 --min-chapter-len 300
+```
+
+**If detection is proposing way more chapters than the book actually has** (a common issue — narration pauses every few minutes can all clear a low `--min-chapter-len`), and you know the real chapter count, use `--target-chapters` instead of guessing at a time floor:
+```
+python chapter_engine.py input.mp3 -o output.m4b --target-chapters 52
 ```
 
 ### Combine mode (multiple files → one book)
