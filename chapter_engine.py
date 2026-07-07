@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """
-chapter_engine.py — v1
+chapter_engine.py — v2
 
 Takes raw, chapterless audio file(s) (mp3/wav/m4a/etc.) and produces an
-.m4b with real chapter markers. Nothing is written until you confirm.
+.m4b with real chapter markers. You confirm the chapter count before
+anything is written.
 
-Two modes:
+Detecting chapters — two strategies:
 
-  Single file — silence detection proposes chapter breaks, which you
-  review interactively (keep / drop / retime each one) before anything
-  is finalized:
+  Silence-only (default, no extra install): finds pauses in the audio
+  and treats them as candidate chapter breaks. Fast, but on books with
+  frequent natural pauses it over-detects. Tune with --min-chapter-len,
+  or set --target-chapters N to keep only the N-1 most pronounced pauses.
+
+  Whisper (--whisper, needs `pip install faster-whisper`): listens to a
+  short clip after each pause and keeps only the ones where the narrator
+  actually announces a chapter ("Chapter One", "Chapter 12", "Prologue",
+  ...). Much more accurate on numbered-chapter audiobooks, but slower and
+  requires the extra package (runs locally/offline — no API key, no cost).
+
+Handling one file vs. many:
+
+  Single file — everything runs on that file:
       python chapter_engine.py input.mp3 -o output.m4b
-      python chapter_engine.py input.mp3 -o output.m4b --min-gap 1.5 --min-chapter-len 180
+      python chapter_engine.py input.mp3 -o output.m4b --whisper
 
   Multiple files — combine mode. Files are concatenated in the order
   given on the command line (first file = start of the book, e.g. disk
-  1, disk 2, ...), then silence detection runs across the *whole*
-  merged stream to propose chapter breaks — chapters aren't assumed to
-  line up with file boundaries. Same interactive review as single-file
-  mode. Chapters are titled "Chapter 1", "Chapter 2", etc. automatically:
-      python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o output.m4b
+  1, disk 2, ...), then treated as one continuous stream — chapters
+  aren't assumed to line up with file boundaries:
+      python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o output.m4b --whisper
       python chapter_engine.py disk1.mp3 disk2.mp3 disk3.mp3 -o output.m4b --title "My Book" --author "Jane Doe"
 
-Requires: ffmpeg + ffprobe on your PATH (brew install ffmpeg)
+Chapters are titled "Chapter 1", "Chapter 2", etc. automatically.
 
-v2 idea (not in this version): swap/augment silence detection with a
-Whisper transcript + topic-shift heuristic for recordings where pauses
-don't line up with real chapter boundaries.
+Requires: ffmpeg + ffprobe on your PATH (brew install ffmpeg).
+Optional:  faster-whisper (`pip install faster-whisper`) for --whisper.
 """
 
 import argparse
@@ -34,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -148,38 +158,128 @@ def fmt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def review_breaks(breaks, duration):
-    """Interactively confirm/drop/adjust each proposed break."""
-    confirmed = [0.0]
-    for b in breaks[1:]:
-        while True:
-            resp = input(
-                f"\nProposed chapter break at {fmt_time(b)} "
-                f"(chapter would be {fmt_time(b - confirmed[-1])} long) "
-                f"— keep? [y/n/type new mm:ss]: "
-            ).strip().lower()
-            if resp == "y":
-                confirmed.append(b)
-                break
-            elif resp == "n":
-                break
-            elif re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", resp):
-                parts = [int(p) for p in resp.split(":")]
-                if len(parts) == 2:
-                    new_t = parts[0] * 60 + parts[1]
-                else:
-                    new_t = parts[0] * 3600 + parts[1] * 60 + parts[2]
-                if new_t <= confirmed[-1] or new_t >= duration:
-                    print(
-                        f"  (timestamp must be after {fmt_time(confirmed[-1])} "
-                        f"and before {fmt_time(duration)})"
-                    )
-                    continue
-                confirmed.append(new_t)
-                break
-            else:
-                print("  (enter y, n, or a timestamp like 12:34)")
-    return confirmed
+def confirm_breaks(breaks, duration):
+    """Show the proposed chapters and ask for a single yes/no on the total,
+    rather than confirming each break one at a time."""
+    n = len(breaks)
+    if n == 1:
+        print("\nNo chapter breaks found — the output would be a single chapter.")
+    else:
+        print(f"\nProposed {n} chapters:")
+        ends = breaks[1:] + [duration]
+        preview = list(range(n)) if n <= 60 else list(range(30)) + [None] + list(range(n - 20, n))
+        for idx in preview:
+            if idx is None:
+                print(f"      ... {n - 50} more ...")
+                continue
+            start = breaks[idx]
+            length = ends[idx] - start
+            print(f"  {idx + 1:>3}. starts {fmt_time(start)}  ({fmt_time(length)} long)")
+    while True:
+        resp = input(f"\nProceed with these {n} chapter(s)? [y/n]: ").strip().lower()
+        if resp == "y":
+            return breaks
+        if resp == "n":
+            sys.exit(
+                "Aborted — nothing was written. Re-run with different options "
+                "(e.g. --whisper, --target-chapters N, or a larger --min-chapter-len)."
+            )
+        print("  (enter y or n)")
+
+
+# --- Whisper-based chapter-cue detection -------------------------------------
+
+_NUM_WORD = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)"
+)
+
+# Matches a spoken chapter announcement at the very start of a clip's
+# transcript: "Chapter 1", "Chapter Twenty-Three", "Prologue", etc.
+CHAPTER_CUE = re.compile(
+    r"^\W*(?:"
+    r"chapter\s+(?:\d+|" + _NUM_WORD + r"(?:[\s-]+(?:and\s+)?" + _NUM_WORD + r")*)"
+    r"|prologue|epilogue|introduction|foreword|afterword|preface|interlude"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def map_abs_to_file(paths, durations, t):
+    """Map an absolute timestamp in the merged stream to (path, local_offset)."""
+    acc = 0.0
+    for p, d in zip(paths, durations):
+        if t < acc + d:
+            return p, t - acc
+        acc += d
+    return paths[-1], durations[-1]
+
+
+def extract_clip(path, start, length, out_wav):
+    """Pull a short mono 16kHz wav clip out of `path` for transcription."""
+    start = max(0.0, start)
+    _, err, code = run([
+        "ffmpeg", "-y", "-ss", str(start), "-i", str(path),
+        "-t", str(length), "-ac", "1", "-ar", "16000",
+        "-f", "wav", str(out_wav),
+    ])
+    if code != 0:
+        sys.exit(f"ffmpeg failed to extract clip at {fmt_time(start)} from {path}:\n{err.strip()}")
+
+
+def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
+    """Keep only the silence gaps that are immediately followed by a spoken
+    chapter announcement, verified by transcribing a short clip after each
+    pause with Whisper. Returns break timestamps (silence midpoints)."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        sys.exit(
+            "Whisper mode needs the faster-whisper package. Install it with:\n"
+            "    pip install faster-whisper\n"
+            "(runs locally/offline — no API key or account needed)."
+        )
+
+    print(f"Loading Whisper model '{args.whisper_model}' (first run downloads it)...")
+    model = WhisperModel(args.whisper_model, device="cpu", compute_type="int8")
+
+    print(f"Listening to {len(gaps)} pauses for spoken chapter announcements "
+          "(this is the slow part)...")
+    breaks = [0.0]
+    tmpdir = Path(tempfile.mkdtemp(prefix="chapeng_"))
+    try:
+        clip = tmpdir / "clip.wav"
+        for i, (s, e) in enumerate(gaps, 1):
+            mid = (s + e) / 2
+            if mid < args.min_chapter_len or duration - mid < args.min_chapter_len:
+                continue
+            if mid - breaks[-1] < args.min_chapter_len:
+                continue
+            # Map the clip to whichever file speech resumes in (so a chapter
+            # announced right after a disk boundary lands in the right file),
+            # then back up 0.3s within that file so the first word isn't clipped.
+            path, offset = map_abs_to_file(paths, durations, e)
+            extract_clip(path, offset - 0.3, args.whisper_clip_len, clip)
+            segments, _ = model.transcribe(str(clip), language=args.whisper_lang, beam_size=1)
+            text = " ".join(seg.text for seg in segments).strip()
+            if CHAPTER_CUE.match(text):
+                breaks.append(mid)
+                print(f"  [{fmt_time(mid)}] chapter cue: \"{text[:50].strip()}\"")
+            if i % 25 == 0:
+                print(f"  ...checked {i}/{len(gaps)} pauses, {len(breaks) - 1} chapters so far")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return breaks
+
+
+def choose_breaks(gaps, duration, paths, durations, args):
+    """Pick chapter breaks using the strategy selected on the command line."""
+    if args.whisper:
+        return detect_chapters_via_transcript(gaps, paths, durations, duration, args)
+    if args.target_chapters:
+        print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
+    return propose_breaks(gaps, duration, args.min_chapter_len, args.target_chapters)
 
 
 def escape_ffmetadata(value):
@@ -275,15 +375,8 @@ def run_single_file(args):
     gaps = detect_silences(input_path, args.noise_db, args.min_gap)
     print(f"Found {len(gaps)} silence gaps.")
 
-    if args.target_chapters:
-        print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
-    breaks = propose_breaks(gaps, duration, args.min_chapter_len, args.target_chapters)
-    if len(breaks) == 1:
-        print("No usable chapter breaks found; output will have a single chapter.")
-    else:
-        print(f"Proposing {len(breaks) - 1} chapter breaks (chapter 1 always starts at 0:00).")
-
-    confirmed = review_breaks(breaks, duration)
+    breaks = choose_breaks(gaps, duration, [input_path], [duration], args)
+    confirmed = confirm_breaks(breaks, duration)
     print(f"\nFinalizing {len(confirmed)} chapters...")
 
     global_tags = {"title": args.title, "artist": args.author}
@@ -311,15 +404,8 @@ def run_combine(args):
     gaps = detect_silences_multi(args.inputs, args.noise_db, args.min_gap)
     print(f"Found {len(gaps)} silence gaps.")
 
-    if args.target_chapters:
-        print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
-    breaks = propose_breaks(gaps, total_duration, args.min_chapter_len, args.target_chapters)
-    if len(breaks) == 1:
-        print("No usable chapter breaks found; output will have a single chapter.")
-    else:
-        print(f"Proposing {len(breaks) - 1} chapter breaks (chapter 1 always starts at 0:00).")
-
-    confirmed = review_breaks(breaks, total_duration)
+    breaks = choose_breaks(gaps, total_duration, args.inputs, durations, args)
+    confirmed = confirm_breaks(breaks, total_duration)
     print(f"\nFinalizing {len(confirmed)} chapters...")
 
     global_tags = {"title": args.title, "artist": args.author}
@@ -348,6 +434,10 @@ def main():
     ap.add_argument("--min-gap", type=float, default=1.5, help="minimum silence length to count as a gap, seconds (default 1.5)")
     ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds (default 180 = 3 min); also used as minimum spacing between breaks when --target-chapters is set")
     ap.add_argument("--target-chapters", type=int, help="if you know the expected chapter count, rank silence gaps by pause length and keep the N-1 most pronounced ones instead of accepting every gap past --min-chapter-len")
+    ap.add_argument("--whisper", action="store_true", help="use Whisper to keep only pauses followed by a spoken chapter announcement (needs `pip install faster-whisper`; slower but far more accurate)")
+    ap.add_argument("--whisper-model", default="base", help="faster-whisper model size: tiny/base/small/medium/large (default base; bigger = more accurate but slower)")
+    ap.add_argument("--whisper-clip-len", type=float, default=10.0, help="seconds of audio after each pause to transcribe when looking for a chapter cue (default 10)")
+    ap.add_argument("--whisper-lang", default="en", help="language code for transcription (default en)")
     ap.add_argument("--title", help="book title to embed as metadata")
     ap.add_argument("--author", help="author name to embed as metadata")
     args = ap.parse_args()
