@@ -15,11 +15,10 @@ Two modes:
 
   Multiple files — combine mode. Files are concatenated in the order
   given on the command line (first file = start of the book), with a
-  chapter marker placed at each file boundary. Chapter titles default
-  to a cleaned-up filename and can be confirmed/renamed interactively:
+  chapter marker placed at each file boundary. Chapters are titled
+  "Chapter 1", "Chapter 2", etc. automatically:
       python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o output.m4b
       python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o output.m4b --title "My Book" --author "Jane Doe"
-      python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o output.m4b --yes   # skip title prompts
 
 Requires: ffmpeg + ffprobe on your PATH (brew install ffmpeg)
 
@@ -136,27 +135,6 @@ def review_breaks(breaks, duration):
             else:
                 print("  (enter y, n, or a timestamp like 12:34)")
     return confirmed
-
-
-def default_chapter_title(path, index):
-    """Turn a filename like '02 - The Storm.mp3' into 'The Storm'."""
-    stem = path.stem
-    cleaned = re.sub(r"^(track\s*)?\d+[\s._-]+", "", stem, flags=re.IGNORECASE)
-    cleaned = cleaned.replace("_", " ").strip()
-    return cleaned if cleaned else f"Chapter {index}"
-
-
-def review_titles(paths, skip_prompts):
-    """Confirm or rename the default (filename-derived) title for each chapter."""
-    titles = []
-    for i, p in enumerate(paths, start=1):
-        default = default_chapter_title(p, i)
-        if skip_prompts:
-            titles.append(default)
-            continue
-        resp = input(f"Chapter {i} title [{default}]: ").strip()
-        titles.append(resp if resp else default)
-    return titles
 
 
 def escape_ffmetadata(value):
@@ -285,14 +263,11 @@ def run_combine(args):
     for d in durations[:-1]:
         breaks.append(breaks[-1] + d)
 
-    print()
-    titles = review_titles(args.inputs, args.yes)
-
     global_tags = {"title": args.title, "artist": args.author}
     has_global_tags = bool(args.title or args.author)
 
     chapters_txt = args.output.with_suffix(".chapters.txt")
-    write_chapters_file(breaks, total_duration, chapters_txt, titles=titles, global_tags=global_tags)
+    write_chapters_file(breaks, total_duration, chapters_txt, global_tags=global_tags)
 
     print("\nCombining files and muxing chapters into output file...")
     err, code = combine_and_mux(args.inputs, chapters_txt, args.output, has_global_tags)
@@ -315,7 +290,6 @@ def main():
     ap.add_argument("--min-chapter-len", type=float, default=180.0, help="minimum chapter length, seconds, single-file mode only (default 180 = 3 min)")
     ap.add_argument("--title", help="book title to embed as metadata")
     ap.add_argument("--author", help="author name to embed as metadata")
-    ap.add_argument("-y", "--yes", action="store_true", help="combine mode only: skip chapter-title prompts, use filenames as-is")
     args = ap.parse_args()
 
     check_dependencies()

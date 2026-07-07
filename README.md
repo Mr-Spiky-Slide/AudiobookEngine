@@ -96,21 +96,9 @@ book:
 python chapter_engine.py "01 - Intro.mp3" "02 - Chapter One.mp3" "03 - Chapter Two.mp3" -o book.m4b
 ```
 
-Each input file becomes its own chapter, split at the file boundaries. You'll
-be prompted to confirm or rename each chapter's title, which defaults to a
-cleaned-up version of the filename:
-
-```
-Chapter 1 title [Intro]:
-Chapter 2 title [Chapter One]:
-```
-
-Press Enter to accept the default, or type a replacement.
-
-Add `-y` / `--yes` to skip the title prompts and just use the filenames as-is:
-```
-python chapter_engine.py 01.mp3 02.mp3 03.mp3 -o book.m4b -y
-```
+Each input file becomes its own chapter, split at the file boundaries.
+Chapters are titled "Chapter 1", "Chapter 2", etc. automatically — no
+prompts, nothing to name.
 
 Works across mixed input formats (e.g. some files mp3, others m4a/wav) —
 each is normalized before being joined, so no manual conversion needed.
