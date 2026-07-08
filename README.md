@@ -117,6 +117,21 @@ Requires `pip install faster-whisper` (see Requirements). It's slower than
 plain silence detection — it has to transcribe a clip at each candidate
 pause — but far more accurate on audiobooks with spoken chapter numbers.
 
+**Faster: `--whisper` + `--target-chapters N`.** If you know how many
+chapters the book has, combine the two. Instead of transcribing every pause,
+it ranks pauses by length (chapter breaks tend to be the longer pauses),
+transcribes them longest-first, verifies each actually says "Chapter N" /
+"Prologue" / etc., and stops once it's found N. This checks far fewer clips
+than plain `--whisper`, and rejects long dramatic pauses that aren't really
+chapters:
+
+```
+python chapter_engine.py input.mp3 -o output.m4b --whisper --target-chapters 52
+```
+
+If it finds fewer than N (some chapters missed), it tells you and keeps what
+it verified — bump `--whisper-model` or lower `--min-gap` and re-run.
+
 **Tuning `--whisper`:**
 
 - *Missing chapters only early in the book?* Common cause: front matter
@@ -141,8 +156,8 @@ pause — but far more accurate on audiobooks with spoken chapter numbers.
 | `--noise-db` | `-35` | Silence threshold in dB. Lower (more negative) = quieter to count as silence. |
 | `--min-gap` | `1.5` | Minimum length (seconds) of a quiet stretch to count as a gap. |
 | `--min-chapter-len` | `180` | Minimum chapter length in seconds (default 3 minutes). Used by silence-only and `--target-chapters` modes. **Not** used by `--whisper` (which relies on the spoken cue instead, so it won't skip short chapters). |
-| `--target-chapters` | *(none)* | If you know the real chapter count and aren't using `--whisper`: ranks silence gaps by pause length and keeps the N-1 most pronounced ones, instead of accepting every pause past `--min-chapter-len`. |
-| `--whisper` | off | Keep only pauses followed by a spoken chapter announcement (needs faster-whisper). |
+| `--target-chapters` | *(none)* | If you know the real chapter count: ranks silence gaps by pause length and keeps the N-1 most pronounced ones. On its own it's silence-only (no transcription); **combined with `--whisper`** it transcribes those ranked pauses and verifies each is a real spoken chapter cue, stopping at N. |
+| `--whisper` | off | Keep only pauses followed by a spoken chapter announcement (needs faster-whisper). Combine with `--target-chapters N` to check the most likely pauses first and stop at N. |
 | `--whisper-model` | `base` | faster-whisper model size: `tiny`/`base`/`small`/`medium`/`large`. Bigger = more accurate but slower. |
 | `--whisper-clip-len` | `10` | Seconds of audio after each pause to transcribe when looking for a chapter cue. |
 | `--whisper-dedupe` | `20` | Minimum seconds between two accepted chapter cues, so one announcement isn't counted twice. Unlike a chapter-length minimum, this is small enough that genuinely short chapters are still detected. |
@@ -155,11 +170,14 @@ Examples:
 # silence-only, tuned thresholds
 python chapter_engine.py input.mp3 -o output.m4b --noise-db -30 --min-gap 2 --min-chapter-len 300
 
-# you know it has 52 chapters, no whisper
+# you know it has 52 chapters, silence-only (no transcription)
 python chapter_engine.py input.mp3 -o output.m4b --target-chapters 52
 
 # most accurate: whisper with a larger model
 python chapter_engine.py input.mp3 -o output.m4b --whisper --whisper-model small
+
+# fast + accurate: verify the 52 longest pauses with whisper, stop at 52
+python chapter_engine.py input.mp3 -o output.m4b --whisper --target-chapters 52
 ```
 
 ### Combine mode (multiple files → one book)

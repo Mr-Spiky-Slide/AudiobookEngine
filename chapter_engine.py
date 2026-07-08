@@ -255,10 +255,9 @@ def extract_clip(path, start, length, out_wav):
         sys.exit(f"ffmpeg failed to extract clip at {fmt_time(start)} from {path}:\n{err.strip()}")
 
 
-def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
-    """Keep only the silence gaps that are immediately followed by a spoken
-    chapter announcement, verified by transcribing a short clip after each
-    pause with Whisper. Returns break timestamps (silence midpoints)."""
+def load_whisper_model(args):
+    """Import faster-whisper (with a friendly message if it's missing) and load
+    the requested model."""
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -267,9 +266,26 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
             "    pip install faster-whisper\n"
             "(runs locally/offline — no API key or account needed)."
         )
-
     print(f"Loading Whisper model '{args.whisper_model}' (first run downloads it)...")
-    model = WhisperModel(args.whisper_model, device="cpu", compute_type="int8")
+    return WhisperModel(args.whisper_model, device="cpu", compute_type="int8")
+
+
+def transcribe_after_gap(model, gap_end, paths, durations, clip_path, args):
+    """Transcribe a short clip starting where speech resumes after a pause."""
+    # Map the clip to whichever file speech resumes in (so a chapter announced
+    # right after a disk boundary lands in the right file), then back up 0.3s
+    # within that file so the first word isn't clipped.
+    path, offset = map_abs_to_file(paths, durations, gap_end)
+    extract_clip(path, offset - 0.3, args.whisper_clip_len, clip_path)
+    segments, _ = model.transcribe(str(clip_path), language=args.whisper_lang, beam_size=1)
+    return " ".join(seg.text for seg in segments).strip()
+
+
+def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
+    """Keep only the silence gaps that are immediately followed by a spoken
+    chapter announcement, verified by transcribing a short clip after each
+    pause with Whisper. Returns break timestamps (silence midpoints)."""
+    model = load_whisper_model(args)
 
     print(f"Listening to {len(gaps)} pauses for spoken chapter announcements "
           "(this is the slow part)...")
@@ -288,13 +304,7 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
             # caught across two adjacent micro-pauses isn't counted twice.
             if len(breaks) > 1 and mid - breaks[-1] < args.whisper_dedupe:
                 continue
-            # Map the clip to whichever file speech resumes in (so a chapter
-            # announced right after a disk boundary lands in the right file),
-            # then back up 0.3s within that file so the first word isn't clipped.
-            path, offset = map_abs_to_file(paths, durations, e)
-            extract_clip(path, offset - 0.3, args.whisper_clip_len, clip)
-            segments, _ = model.transcribe(str(clip), language=args.whisper_lang, beam_size=1)
-            text = " ".join(seg.text for seg in segments).strip()
+            text = transcribe_after_gap(model, e, paths, durations, clip, args)
             if find_chapter_cue(text):
                 breaks.append(mid)
                 print(f"  [{fmt_time(mid)}] chapter cue: \"{text[:50].strip()}\"")
@@ -305,14 +315,53 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
     return breaks
 
 
+def detect_chapters_target_verified(gaps, paths, durations, duration, args):
+    """Hybrid of --target-chapters and --whisper: rank the pauses by how long
+    the silence is (chapter breaks tend to be the more pronounced pauses),
+    then transcribe them longest-first and keep only the ones where the
+    narrator actually announces a chapter, stopping once we've found the
+    requested count. Transcribes far fewer clips than checking every pause."""
+    model = load_whisper_model(args)
+
+    needed = max(0, args.target_chapters - 1)
+    ranked = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)
+    print(f"Checking pauses longest-first for spoken chapter cues, "
+          f"aiming for {args.target_chapters} chapters...")
+
+    selected = []  # accepted break timestamps (not necessarily in time order)
+    tmpdir = Path(tempfile.mkdtemp(prefix="chapeng_"))
+    try:
+        clip = tmpdir / "clip.wav"
+        for i, (s, e) in enumerate(ranked, 1):
+            if len(selected) >= needed:
+                break
+            mid = (s + e) / 2
+            if mid < 1.0 or duration - mid < 1.0:
+                continue
+            if any(abs(mid - b) < args.whisper_dedupe for b in selected):
+                continue
+            text = transcribe_after_gap(model, e, paths, durations, clip, args)
+            if find_chapter_cue(text):
+                selected.append(mid)
+                print(f"  [{fmt_time(mid)}] chapter cue: \"{text[:50].strip()}\" "
+                      f"({len(selected)}/{needed})")
+            if i % 50 == 0:
+                print(f"  ...transcribed {i} pauses, {len(selected)} chapters so far")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if len(selected) < needed:
+        print(f"Note: found {len(selected)} chapter cues, fewer than the "
+              f"{needed} requested. Try a larger --whisper-model or a smaller "
+              "--min-gap if chapters are being missed.")
+    return [0.0] + sorted(selected)
+
+
 def choose_breaks(gaps, duration, paths, durations, args):
     """Pick chapter breaks using the strategy selected on the command line."""
+    if args.whisper and args.target_chapters:
+        return detect_chapters_target_verified(gaps, paths, durations, duration, args)
     if args.whisper:
-        if args.target_chapters:
-            print(
-                "Note: --target-chapters is ignored when --whisper is set "
-                "(Whisper decides breaks from spoken chapter cues instead)."
-            )
         return detect_chapters_via_transcript(gaps, paths, durations, duration, args)
     if args.target_chapters:
         print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
