@@ -119,8 +119,14 @@ pause — but far more accurate on audiobooks with spoken chapter numbers.
 
 **Tuning `--whisper`:**
 
-- *Missing some chapters?* First try a better model: `--whisper-model small`
-  (or `medium`). A weaker model can mishear "Chapter Twelve." If a specific
+- *Missing chapters only early in the book?* Common cause: front matter
+  (narrator disclaimers, "Book One.", intro music) before the actual chapter
+  announcement, or a longer musical intro that delays it. The cue detector
+  already tolerates a short preamble phrase before "Chapter..." — if it's
+  still missing early ones, try a longer `--whisper-clip-len` (e.g. `20`)
+  so there's more room to reach the cue if it's delayed by an intro.
+- *Missing chapters generally?* Try a better model: `--whisper-model small`
+  (or `medium`) — a weaker model can mishear "Chapter Twelve." If a specific
   chapter has a very short pause before the announcement, lower `--min-gap`
   (e.g. `--min-gap 1.0`) so that pause still registers as a candidate.
 - *Too many candidate pauses / too slow?* Raise `--min-gap` (e.g. `2.0`) so

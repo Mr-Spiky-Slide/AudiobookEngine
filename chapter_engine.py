@@ -195,25 +195,42 @@ _NUM_WORD = (
     r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)"
 )
 
-# Matches a spoken chapter announcement at the very start of a clip's
-# transcript: "Chapter 1", "Chapter Twenty-Three", "Prologue", etc.
+# Matches a spoken chapter announcement: "Chapter 1", "Chapter Twenty-Three",
+# "Prologue", etc. Not anchored to the start of the string — see
+# find_chapter_cue, which searches only the first few words of a clip so
+# a short preamble ("Book One.", "This audiobook is narrated by...") before
+# the actual announcement doesn't cause a miss, without matching a stray
+# mention of "chapter" anywhere in a longer clip.
 CHAPTER_CUE = re.compile(
-    r"^\W*(?:"
+    r"\b(?:"
     r"chapter\s+(?:\d+|" + _NUM_WORD + r"(?:[\s-]+(?:and\s+)?" + _NUM_WORD + r")*)"
     r"|prologue|epilogue|introduction|foreword|afterword|preface|interlude"
     r")\b",
     re.IGNORECASE,
 )
 
+# How many leading characters of a clip's transcript count as "the start" for
+# cue-matching purposes. Wide enough to skip a short preamble phrase, narrow
+# enough that an unrelated "chapter" mention deeper in a longer clip won't
+# falsely trigger a chapter break.
+CUE_SEARCH_WINDOW = 100
+
 
 def clean_cue_text(text):
     """Normalize a transcribed clip before cue-matching: Whisper often prepends
-    quotes, dashes, ellipses or a stray '[music]'-style tag, which would push
-    the chapter word past the start anchor. Strip that leading noise."""
+    quotes, dashes, ellipses or a stray '[music]'-style tag. Strip that leading
+    noise so it doesn't eat into the cue-search window."""
     text = text.strip()
     text = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)  # drop a leading [sound] tag
     text = re.sub(r"^[^0-9A-Za-z]+", "", text)     # drop leading quotes/dashes/dots
     return text
+
+
+def find_chapter_cue(text):
+    """Look for a chapter announcement near the start of a transcribed clip
+    (within the first CUE_SEARCH_WINDOW characters), tolerating a short
+    preamble before it."""
+    return CHAPTER_CUE.search(clean_cue_text(text)[:CUE_SEARCH_WINDOW])
 
 
 def map_abs_to_file(paths, durations, t):
@@ -278,7 +295,7 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
             extract_clip(path, offset - 0.3, args.whisper_clip_len, clip)
             segments, _ = model.transcribe(str(clip), language=args.whisper_lang, beam_size=1)
             text = " ".join(seg.text for seg in segments).strip()
-            if CHAPTER_CUE.match(clean_cue_text(text)):
+            if find_chapter_cue(text):
                 breaks.append(mid)
                 print(f"  [{fmt_time(mid)}] chapter cue: \"{text[:50].strip()}\"")
             if i % 50 == 0:
