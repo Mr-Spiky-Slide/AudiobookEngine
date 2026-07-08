@@ -308,6 +308,11 @@ def detect_chapters_via_transcript(gaps, paths, durations, duration, args):
 def choose_breaks(gaps, duration, paths, durations, args):
     """Pick chapter breaks using the strategy selected on the command line."""
     if args.whisper:
+        if args.target_chapters:
+            print(
+                "Note: --target-chapters is ignored when --whisper is set "
+                "(Whisper decides breaks from spoken chapter cues instead)."
+            )
         return detect_chapters_via_transcript(gaps, paths, durations, duration, args)
     if args.target_chapters:
         print(f"Ranking gaps by pause length to find the {args.target_chapters} most likely chapter breaks...")
